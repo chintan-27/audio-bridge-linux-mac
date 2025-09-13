@@ -58,6 +58,19 @@ fn attach_bus_logging(p: &gst::Pipeline, tag: &str) {
                         i.error(),
                         i.debug()
                     ),
+                    MessageView::Element(el) => {
+                    if let Some(s) = el.structure() {
+                        if s.name() == "level" {
+                            let rms = s.get_value("rms").ok();
+                            let peak = s.get_value("peak").ok();
+                            eprintln!(
+                                "[{tag}] LEVEL rms={:?}, peak={:?}",
+                                rms.unwrap_or_default(),
+                                peak.unwrap_or_default()
+                            );
+                        }
+                    }
+                }
                     MessageView::StateChanged(s) => {
                         if let Some(src) = msg.src() {
                             if src.type_().is_a(gst::Pipeline::static_type()) {
@@ -296,6 +309,14 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
         make_element("pulsesink", "sink")?
     };
 
+    let level = make_element("level", "level")?;
+    if level.has_property("interval", None) {
+        level.set_property("interval", 100_000_000u64); // 100ms
+    }
+    if level.has_property("post-messages", None) {
+        level.set_property("post-messages", true);
+    }
+
     // Modest sink buffers (override via env if needed)
     let sink_buf_us: i64 = env::var("SINK_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(70_000);
     let sink_lat_us: i64 = env::var("SINK_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(15_000);
@@ -314,10 +335,10 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
     }
 
     pipeline.add_many(&[
-        &src, &q_net, &jitter, &depay, &dec, &convert, &resample, &q_sink, &sink,
+        &src, &q_net, &jitter, &depay, &dec, &convert, &resample, &level, &q_sink, &sink,
     ])?;
     gst::Element::link_many(&[
-        &src, &q_net, &jitter, &depay, &dec, &convert, &resample, &q_sink, &sink,
+        &src, &q_net, &jitter, &depay, &dec, &convert, &resample, &level, &q_sink, &sink,
     ])?;
 
     // Probes
