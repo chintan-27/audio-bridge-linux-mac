@@ -59,9 +59,13 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
 
     let opusenc = gst::ElementFactory::make("opusenc")
         .property("bitrate", 256_000i32)
-        .property("frame-size", 2.5f64) // 2.5ms frames
         .property("inband-fec", false)
         .build()?;
+    // 'frame-size' is an enum (GstOpusEncFrameSize). Set it via string to avoid type mismatch.
+    if opusenc.has_property("frame-size", None) {
+        // accepted values include: "2.5", "5", "10", "20", "40", "60"
+        opusenc.set_property_from_str("frame-size", "2.5");
+    }
     let pay = gst::ElementFactory::make("rtpopuspay")
         .property("pt", 97i32)
         .build()?;
