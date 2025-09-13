@@ -26,7 +26,17 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
         gst::ElementFactory::make("pipewiresrc").build()?
     };
     if let Some(name) = device_name {
-        src.set_property("device", &name)?;
+        if src.has_property("device", None) {
+            src.set_property("device", name);
+        } else if src.has_property("device-name", None) {
+            src.set_property("device-name", name);
+        } else {
+            eprintln!(
+                "[warn] capture device hint '{}' ignored (no 'device'/'device-name' on {})",
+                name,
+                src.factory().map(|f| f.name()).unwrap_or_else(|| "unknown".into())
+            );
+        }
     }
 
     // Tight device buffers help latency; tune conservatively first
