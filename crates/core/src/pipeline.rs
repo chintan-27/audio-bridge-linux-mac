@@ -64,9 +64,7 @@ fn attach_bus_logging(p: &gst::Pipeline, tag: &str) {
                             }
                         }
                     }
-                    MessageView::Latency(_) => {
-                        eprintln!("[{tag}] latency message");
-                    }
+                    MessageView::Latency(_) => eprintln!("[{tag}] latency message"),
                     _ => {}
                 }
             }
@@ -77,15 +75,11 @@ fn attach_bus_logging(p: &gst::Pipeline, tag: &str) {
 fn attach_caps_probe(elem: &gst::Element, pad_name: &str, tag: &str) {
     if let Some(pad) = elem.static_pad(pad_name) {
         let t = tag.to_string();
+        let p = pad_name.to_string();
         pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
-            if let Some(gst::PadProbeData::Event(ev)) = info.data {
+            if let Some(ev) = info.event() {
                 if let gst::EventView::Caps(c) = ev.view() {
-                    eprintln!(
-                        "[caps:{t}] {}:{} -> {}",
-                        c.src().map(|s| s.path_string()).unwrap_or_default(),
-                        pad_name,
-                        c.caps().to_string()
-                    );
+                    eprintln!("[caps:{t}] {p} -> {}", c.caps().to_string());
                 }
             }
             gst::PadProbeReturn::Ok
@@ -107,7 +101,7 @@ pub fn init_gst() -> Result<()> {
 
 /// Build an Opus-over-RTP sender.
 /// macOS: normally omit `device_name` and set **System Input = BlackHole 2ch**.
-/// If you insist on passing a device, `osxaudiosrc.device` is an **integer index**.
+/// If you pass a device, `osxaudiosrc.device` is an **integer index**.
 pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<Sender> {
     let pipeline = gst::Pipeline::new();
 
@@ -162,9 +156,7 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
         .field("layout", "interleaved")
         .build();
     let capsfilter = make_element("capsfilter", "acaps")?;
-    capsfilter
-        .set_property("caps", &caps)
-        .expect("set caps on capsfilter");
+    capsfilter.set_property("caps", &caps);
     eprintln!("[sender] enforce caps: {}", caps.to_string());
 
     // Opus encode
@@ -217,9 +209,7 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
         .field("pt", 97i32)
         .build();
     let capsfilter = make_element("capsfilter", "rcaps")?;
-    capsfilter
-        .set_property("caps", &caps)
-        .expect("set caps on rcaps");
+    capsfilter.set_property("caps", &caps);
     eprintln!("[recv] expect RTP caps: {}", caps.to_string());
 
     // Jitter buffer (guard properties for older builds)
@@ -250,7 +240,6 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
     let sink = if cfg!(target_os = "macos") {
         make_element("osxaudiosink", "sink")?
     } else {
-        // Use `AUTO_SINK=1` env var to force autoaudiosink, else pipewiresink.
         match env::var("AUTO_SINK").as_deref() {
             Ok("1") => {
                 eprintln!("[recv] using autoaudiosink (AUTO_SINK=1)");
