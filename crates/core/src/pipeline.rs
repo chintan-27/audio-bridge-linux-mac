@@ -181,7 +181,7 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
     pipeline.add_many(&[&src, &convert, &resample, &capsfilter, &opusenc, &pay, &sink])?;
     gst::Element::link_many(&[&src, &convert, &resample, &capsfilter, &opusenc, &pay, &sink])?;
 
-    // Caps probes (handy when debugging)
+    // Caps probes
     attach_caps_probe(&src, "src", "snd/src");
     attach_caps_probe(&opusenc, "src", "snd/opus");
     attach_caps_probe(&pay, "src", "snd/rtp");
@@ -196,21 +196,18 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
 pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
     let pipeline = gst::Pipeline::new();
 
-    // UDP in
+    // UDP in + fully fixed RTP caps *directly on udpsrc*
+    // Important: use 'payload=97' instead of 'pt=97' to satisfy your build.
     let src = make_element("udpsrc", "udpsrc")?;
     src.set_property("port", listen_port as i32); // gint
-    eprintln!("[recv] udpsrc listening on :{}", listen_port);
-
-    // Caps must match sender
-    let caps = gst::Caps::builder("application/x-rtp")
+    let rtp_caps = gst::Caps::builder("application/x-rtp")
         .field("media", "audio")
         .field("encoding-name", "OPUS")
         .field("clock-rate", 48_000i32)
-        .field("pt", 97i32)
+        .field("payload", 97i32) // <-- key fix (not 'pt')
         .build();
-    let capsfilter = make_element("capsfilter", "rcaps")?;
-    capsfilter.set_property("caps", &caps);
-    eprintln!("[recv] expect RTP caps: {}", caps.to_string());
+    src.set_property("caps", &rtp_caps);
+    eprintln!("[recv] udpsrc listening on :{} with caps {}", listen_port, rtp_caps.to_string());
 
     // Jitter buffer (guard properties for older builds)
     let jitter = make_element("rtpjitterbuffer", "jbuf")?;
@@ -252,15 +249,10 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
         }
     };
 
-    pipeline.add_many(&[
-        &src, &capsfilter, &jitter, &depay, &dec, &convert, &resample, &sink,
-    ])?;
-    gst::Element::link_many(&[
-        &src, &capsfilter, &jitter, &depay, &dec, &convert, &resample, &sink,
-    ])?;
+    pipeline.add_many(&[&src, &jitter, &depay, &dec, &convert, &resample, &sink])?;
+    gst::Element::link_many(&[&src, &jitter, &depay, &dec, &convert, &resample, &sink])?;
 
     // Caps probes
-    attach_caps_probe(&src, "src", "rcv/rtp");
     attach_caps_probe(&depay, "src", "rcv/opus");
     attach_caps_probe(&sink, "sink", "rcv/sink");
 
