@@ -297,8 +297,8 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
     };
 
     // Modest sink buffers (override via env if needed)
-    let sink_buf_us: u64 = env::var("SINK_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(70_000);
-    let sink_lat_us: u64 = env::var("SINK_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(15_000);
+    let sink_buf_us: i64 = env::var("SINK_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(70_000);
+    let sink_lat_us: i64 = env::var("SINK_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(15_000);
     if sink.has_property("buffer-time", None) {
         sink.set_property("buffer-time", sink_buf_us);
         eprintln!("[recv] sink.buffer-time={} us", sink_buf_us);
