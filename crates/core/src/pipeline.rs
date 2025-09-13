@@ -71,7 +71,7 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
         .build()?;
     let sink = gst::ElementFactory::make("udpsink")
         .property("host", host)
-        .property("port", port as u32)  // guint
+        .property("port", port as i32)  // guint
         .build()?;
 
     pipeline.add_many(&[&src, &convert, &resample, &capsfilter, &opusenc, &pay, &sink])?;
