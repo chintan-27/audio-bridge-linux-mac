@@ -1,0 +1,11 @@
+[package]
+name = "ab-daemon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ab-core = { path = "../core" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+zeroconf = "0.13"

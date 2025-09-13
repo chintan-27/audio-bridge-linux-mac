@@ -1,0 +1,15 @@
+[package]
+name = "ab-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+thiserror = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+gstreamer = "0.23"
+gstreamer-audio = "0.23"
+gstreamer-rtp = "0.23"
+gstreamer-base = "0.23"
+gstreamer-app = "0.23"
+once_cell = "1"
