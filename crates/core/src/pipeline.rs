@@ -196,28 +196,40 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
 pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
     let pipeline = gst::Pipeline::new();
 
-    // UDP in + fully fixed RTP caps *directly on udpsrc*
-    // Important: use 'payload=97' instead of 'pt=97' to satisfy your build.
+    // UDP in + fixed RTP caps on udpsrc (use 'payload' for compatibility)
     let src = make_element("udpsrc", "udpsrc")?;
     src.set_property("port", listen_port as i32); // gint
     let rtp_caps = gst::Caps::builder("application/x-rtp")
         .field("media", "audio")
         .field("encoding-name", "OPUS")
         .field("clock-rate", 48_000i32)
-        .field("payload", 97i32) // <-- key fix (not 'pt')
+        .field("payload", 97i32)
         .build();
     src.set_property("caps", &rtp_caps);
     eprintln!("[recv] udpsrc listening on :{} with caps {}", listen_port, rtp_caps.to_string());
 
-    // Jitter buffer (guard properties for older builds)
+    // Small decoupling queue right after network
+    let q_net = make_element("queue", "q_net")?;
+    // time-based queue (no hard caps on buffers/bytes)
+    q_net.set_property("max-size-buffers", 0u32);
+    q_net.set_property("max-size-bytes", 0u32);
+    q_net.set_property("max-size-time", 20_000_000u64); // 20 ms
+
+    // Jitter buffer (tunable)
     let jitter = make_element("rtpjitterbuffer", "jbuf")?;
+    let jitter_ms: u32 = env::var("JITTER_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20); // default 20 ms (was 10)
     if jitter.has_property("latency", None) {
-        jitter.set_property("latency", 10u32);
-        eprintln!("[recv] jbuf.latency=10 ms");
+        jitter.set_property("latency", jitter_ms);
+        eprintln!("[recv] jbuf.latency={} ms", jitter_ms);
     }
     if jitter.has_property("drop-on-late", None) {
-        jitter.set_property("drop-on-late", true);
-        eprintln!("[recv] jbuf.drop-on-late=true");
+        // Optional: disable if you prefer late frames over drops
+        let drop_on_late = env::var("DROP_ON_LATE").map(|v| v == "1").unwrap_or(true);
+        jitter.set_property("drop-on-late", drop_on_late);
+        eprintln!("[recv] jbuf.drop-on-late={}", drop_on_late);
     }
     if jitter.has_property("do-lost", None) {
         jitter.set_property("do-lost", true);
@@ -228,12 +240,21 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
     let depay = make_element("rtpopusdepay", "depay")?;
     let dec = make_element("opusdec", "opusdec")?;
     if dec.has_property("plc", None) {
-        dec.set_property("plc", false);
+        // You can enable PLC to mask losses: set PLC=1
+        let plc = env::var("PLC").map(|v| v == "1").unwrap_or(false);
+        dec.set_property("plc", plc);
+        eprintln!("[recv] opusdec.plc={}", plc);
     }
     let convert = make_element("audioconvert", "aconv")?;
     let resample = make_element("audioresample", "ares")?;
 
-    // Sink (Linux: prefer autoaudiosink to avoid null-sink surprises)
+    // Another tiny queue before sink to absorb sink scheduling
+    let q_sink = make_element("queue", "q_sink")?;
+    q_sink.set_property("max-size-buffers", 0u32);
+    q_sink.set_property("max-size-bytes", 0u32);
+    q_sink.set_property("max-size-time", 20_000_000u64); // 20 ms
+
+    // Sink selection (AUTO_SINK=1 to force autoaudiosink)
     let sink = if cfg!(target_os = "macos") {
         make_element("osxaudiosink", "sink")?
     } else {
@@ -249,10 +270,39 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
         }
     };
 
-    pipeline.add_many(&[&src, &jitter, &depay, &dec, &convert, &resample, &sink])?;
-    gst::Element::link_many(&[&src, &jitter, &depay, &dec, &convert, &resample, &sink])?;
+    // Modest sink buffers (us); override via env if you like
+    let sink_buf_us: u32 = env::var("SINK_BUFFER_US")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(40_000); // 40 ms
+    let sink_lat_us: u32 = env::var("SINK_LATENCY_US")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10_000); // 10 ms
+    if sink.has_property("buffer-time", None) {
+        sink.set_property("buffer-time", sink_buf_us);
+        eprintln!("[recv] sink.buffer-time={} us", sink_buf_us);
+    }
+    if sink.has_property("latency-time", None) {
+        sink.set_property("latency-time", sink_lat_us);
+        eprintln!("[recv] sink.latency-time={} us", sink_lat_us);
+    }
 
-    // Caps probes
+    // Optionally bypass strict clock sync at the sink (SINK_SYNC=0)
+    if sink.has_property("sync", None) {
+        let sync = env::var("SINK_SYNC").map(|v| v != "0").unwrap_or(true);
+        sink.set_property("sync", sync);
+        eprintln!("[recv] sink.sync={}", sync);
+    }
+
+    pipeline.add_many(&[
+        &src, &q_net, &jitter, &depay, &dec, &convert, &resample, &q_sink, &sink,
+    ])?;
+    gst::Element::link_many(&[
+        &src, &q_net, &jitter, &depay, &dec, &convert, &resample, &q_sink, &sink,
+    ])?;
+
+    // Probes
     attach_caps_probe(&depay, "src", "rcv/opus");
     attach_caps_probe(&sink, "sink", "rcv/sink");
 
