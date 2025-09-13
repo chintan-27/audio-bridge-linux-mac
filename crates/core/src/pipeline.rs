@@ -67,11 +67,11 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
         opusenc.set_property_from_str("frame-size", "2.5");
     }
     let pay = gst::ElementFactory::make("rtpopuspay")
-        .property("pt", 97i32)
+        .property("pt", 97u32)   // guint
         .build()?;
     let sink = gst::ElementFactory::make("udpsink")
         .property("host", host)
-        .property("port", port as i32)
+        .property("port", port as u32)  // guint
         .build()?;
 
     pipeline.add_many(&[&src, &convert, &resample, &capsfilter, &opusenc, &pay, &sink])?;
