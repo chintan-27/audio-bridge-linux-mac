@@ -94,11 +94,18 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
         .property("caps", &caps)
         .build()?;
 
-    let jitter = gst::ElementFactory::make("rtpjitterbuffer")
-        .property("latency", 10u32)           // ms: tune 8–12 on LAN
-        .property("drop-on-late", true)
-        .property("do-lost", true)
-        .build()?;
+    let jitter = gst::ElementFactory::make("rtpjitterbuffer").build()?;
+    // Some distros ship older rtpjitterbuffer without certain props.
+    if jitter.has_property("latency", None) {
+        jitter.set_property("latency", 10u32);
+    }
+    if jitter.has_property("drop-on-late", None) {
+        jitter.set_property("drop-on-late", true);
+    }
+    if jitter.has_property("do-lost", None) {
+        jitter.set_property("do-lost", true);
+    }
+
 
     let depay = gst::ElementFactory::make("rtpopusdepay").build()?;
     let dec = gst::ElementFactory::make("opusdec")
