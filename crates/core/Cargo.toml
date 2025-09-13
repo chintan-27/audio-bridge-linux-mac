@@ -1,12 +1,12 @@
 [package]
 name = "ab-core"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 anyhow = "1"
 thiserror = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 gstreamer = "0.23"
 gstreamer-audio = "0.23"
 gstreamer-rtp = "0.23"
