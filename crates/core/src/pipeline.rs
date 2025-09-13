@@ -26,15 +26,20 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
         gst::ElementFactory::make("pipewiresrc").build()?
     };
     if let Some(name) = device_name {
-        if src.has_property("device", None) {
-            src.set_property("device", name);
-        } else if src.has_property("device-name", None) {
+        let mut set_ok = false;
+        if src.has_property("device-name", None) {
             src.set_property("device-name", name);
-        } else {
+            set_ok = true;
+        } else if src.has_property("device", None) {
+            if let Ok(idx) = name.parse::<i32>() {
+                src.set_property("device", idx);
+                set_ok = true;
+            }
+        }
+        if !set_ok {
             eprintln!(
-                "[warn] capture device hint '{}' ignored (no 'device'/'device-name' on {})",
-                name,
-                src.factory().map(|f| f.name()).unwrap_or_else(|| "unknown".into())
+                "[warn] capture device hint '{}' ignored (need 'device-name' or integer 'device')",
+                name
             );
         }
     }
@@ -72,6 +77,8 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
     let sink = gst::ElementFactory::make("udpsink")
         .property("host", host)
         .property("port", port as i32)  // guint
+        .property("sync", false)
+        .property("async", false)
         .build()?;
 
     pipeline.add_many(&[&src, &convert, &resample, &capsfilter, &opusenc, &pay, &sink])?;
@@ -119,9 +126,17 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
     let resample = gst::ElementFactory::make("audioresample").build()?;
 
     let sink = if cfg!(target_os = "macos") {
-        gst::ElementFactory::make("osxaudiosink").build()?
+        gst::ElementFactory::make("osxaudiosink")
+            // Reduce added buffering if your build supports it
+            .build()?
     } else {
+        // NOTE: If your default sink is a null sink (e.g., "bridge_out"),
+        // this will be silent. You can:
+        //  - change the default sink with `pactl set-default-sink <real_sink>`, or
+        //  - set a specific device here via property (if supported by your build), or
+        //  - temporarily replace with `autoaudiosink` for testing.
         gst::ElementFactory::make("pipewiresink").build()?
+        // For testing: `gst::ElementFactory::make("autoaudiosink").build()?`
     };
 
     pipeline.add_many(&[&src, &capsfilter, &jitter, &depay, &dec, &convert, &resample, &sink])?;
