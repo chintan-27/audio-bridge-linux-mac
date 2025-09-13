@@ -23,7 +23,7 @@ Think “DIY Dante Lite” for home/office, written in Rust.
    ```bash
    cd scripts
    ./macos_setup.sh
-````
+```
 
 This installs:
 
