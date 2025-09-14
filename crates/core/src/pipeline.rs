@@ -59,18 +59,11 @@ fn attach_bus_logging(p: &gst::Pipeline, tag: &str) {
                         i.debug()
                     ),
                     MessageView::Element(el) => {
-                    if let Some(s) = el.structure() {
-                        if s.name() == "level" {
-                            let rms = s.get_value("rms").ok();
-                            let peak = s.get_value("peak").ok();
-                            eprintln!(
-                                "[{tag}] LEVEL rms={:?}, peak={:?}",
-                                rms.unwrap_or_default(),
-                                peak.unwrap_or_default()
-                            );
+                        if let Some(s) = el.structure() {
+                            // Prints 'level' messages (rms/peak/decay) and any other element posts.
+                            eprintln!("[{tag}] ELEMENT {}", s.to_string());
                         }
                     }
-                }
                     MessageView::StateChanged(s) => {
                         if let Some(src) = msg.src() {
                             if src.type_().is_a(gst::Pipeline::static_type()) {
@@ -138,33 +131,34 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
         let mut set_ok = false;
         if src.has_property("device-name", None) {
             src.set_property("device-name", name);
-            eprintln!("[sender] set device-name='{}'", name);
+            eprintln!("[sender] set device-name='{name}'");
             set_ok = true;
         } else if src.has_property("device", None) {
             if let Ok(idx) = name.parse::<i32>() {
                 src.set_property("device", idx);
-                eprintln!("[sender] set device index={}", idx);
+                eprintln!("[sender] set device index={idx}");
                 set_ok = true;
             } else {
-                eprintln!("[sender] note: 'device' expects integer index; got '{}'", name);
+                eprintln!("[sender] note: 'device' expects integer index; got '{name}'");
             }
         }
         if !set_ok {
             eprintln!(
-                "[sender][warn] capture device hint '{}' ignored (need 'device-name' or integer 'device')",
-                name
+                "[sender][warn] capture device hint '{name}' ignored (need 'device-name' or integer 'device')"
             );
         }
     }
 
-    // Relax source buffers (avoid "Can't record audio fast enough" on macOS)
+    // Relax source buffers (env-overridable) to avoid "Can't record fast enough" on macOS
+    let src_buf_us: u64 = env::var("AB_SRC_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000);
+    let src_lat_us: u64 = env::var("AB_SRC_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000);
     if src.has_property("buffer-time", None) {
-        src.set_property("buffer-time", 20_000i64); // µs
-        eprintln!("[sender] src.buffer-time=20000");
+        src.set_property("buffer-time", src_buf_us);
+        eprintln!("[sender] src.buffer-time={} us", src_buf_us);
     }
     if src.has_property("latency-time", None) {
-        src.set_property("latency-time", 20_000i64); // µs
-        eprintln!("[sender] src.latency-time=20000");
+        src.set_property("latency-time", src_lat_us);
+        eprintln!("[sender] src.latency-time={} us", src_lat_us);
     }
 
     // Decouple source from encoder with a tiny time-based queue
@@ -207,7 +201,7 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
     sink.set_property("port", port as i32); // gint
     sink.set_property("sync", false);
     sink.set_property("async", false);
-    eprintln!("[sender] udpsink → {}:{}", host, port);
+    eprintln!("[sender] udpsink → {host}:{port}");
 
     pipeline.add_many(&[&src, &q_src, &convert, &resample, &capsfilter, &opusenc, &pay, &sink])?;
     gst::Element::link_many(&[&src, &q_src, &convert, &resample, &capsfilter, &opusenc, &pay, &sink])?;
@@ -264,7 +258,7 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
     if jitter.has_property("drop-on-late", None) {
         let drop_on_late = env::var("DROP_ON_LATE").map(|v| v == "1").unwrap_or(true);
         jitter.set_property("drop-on-late", drop_on_late);
-        eprintln!("[recv] jbuf.drop-on-late={}", drop_on_late);
+        eprintln!("[recv] jbuf.drop-on-late={drop_on_late}");
     }
     if jitter.has_property("do-lost", None) {
         jitter.set_property("do-lost", true);
@@ -277,10 +271,19 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
     if dec.has_property("plc", None) {
         let plc = env::var("PLC").map(|v| v == "1").unwrap_or(false);
         dec.set_property("plc", plc);
-        eprintln!("[recv] opusdec.plc={}", plc);
+        eprintln!("[recv] opusdec.plc={plc}");
     }
     let convert = make_element("audioconvert", "aconv")?;
     let resample = make_element("audioresample", "ares")?;
+
+    // Live audio meter to verify decoded audio activity
+    let level = make_element("level", "level")?;
+    if level.has_property("interval", None) {
+        level.set_property("interval", 100_000_000u64); // 100 ms
+    }
+    if level.has_property("post-messages", None) {
+        level.set_property("post-messages", true);
+    }
 
     // Another tiny queue before sink to absorb sink scheduling
     let q_sink = make_element("queue", "q_sink")?;
@@ -295,7 +298,7 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
     let sink = if cfg!(target_os = "macos") {
         make_element("osxaudiosink", "sink")?
     } else if let Ok(dev) = env::var("PULSE_SINK") {
-        eprintln!("[recv] using pulsesink device='{}' (PULSE_SINK)", dev);
+        eprintln!("[recv] using pulsesink device='{dev}' (PULSE_SINK)");
         let s = make_element("pulsesink", "sink")?;
         if s.has_property("device", None) {
             s.set_property("device", dev);
@@ -309,17 +312,9 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
         make_element("pulsesink", "sink")?
     };
 
-    let level = make_element("level", "level")?;
-    if level.has_property("interval", None) {
-        level.set_property("interval", 100_000_000u64); // 100ms
-    }
-    if level.has_property("post-messages", None) {
-        level.set_property("post-messages", true);
-    }
-
     // Modest sink buffers (override via env if needed)
-    let sink_buf_us: i64 = env::var("SINK_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(70_000);
-    let sink_lat_us: i64 = env::var("SINK_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(15_000);
+    let sink_buf_us: u64 = env::var("SINK_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(70_000);
+    let sink_lat_us: u64 = env::var("SINK_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(15_000);
     if sink.has_property("buffer-time", None) {
         sink.set_property("buffer-time", sink_buf_us);
         eprintln!("[recv] sink.buffer-time={} us", sink_buf_us);
@@ -331,7 +326,7 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
     if sink.has_property("sync", None) {
         let sync = env::var("SINK_SYNC").map(|v| v != "0").unwrap_or(true);
         sink.set_property("sync", sync);
-        eprintln!("[recv] sink.sync={}", sync);
+        eprintln!("[recv] sink.sync={sync}");
     }
 
     pipeline.add_many(&[
