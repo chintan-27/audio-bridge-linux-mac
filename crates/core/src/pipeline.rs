@@ -186,8 +186,8 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
     }
 
     // Relax source buffers (env-overridable) to avoid "Can't record fast enough" on macOS
-    let src_buf_us: u64 = env::var("AB_SRC_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000);
-    let src_lat_us: u64 = env::var("AB_SRC_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000);
+    let src_buf_us: i64 = env::var("AB_SRC_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000);
+    let src_lat_us: i64 = env::var("AB_SRC_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000);
     if src.has_property("buffer-time", None) {
         src.set_property("buffer-time", src_buf_us);
         eprintln!("[sender] src.buffer-time={} us", src_buf_us);
@@ -201,7 +201,7 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
     let q_src = make_element("queue", "q_src")?;
     q_src.set_property("max-size-buffers", 0u32);
     q_src.set_property("max-size-bytes", 0u32);
-    q_src.set_property("max-size-time", 20_000_000u64); // 20 ms
+    q_src.set_property("max-size-time", 20_000_000i64); // 20 ms
 
     // Normalize format before Opus (low-latency canonical format)
     let convert = make_element("audioconvert", "aconv")?;
@@ -364,8 +364,8 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
     };
 
     // Modest sink buffers (override via env if needed)
-    let sink_buf_us: u64 = env::var("SINK_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(70_000);
-    let sink_lat_us: u64 = env::var("SINK_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(15_000);
+    let sink_buf_us: i64 = env::var("SINK_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(70_000);
+    let sink_lat_us: i64 = env::var("SINK_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(15_000);
     if sink.has_property("buffer-time", None) {
         sink.set_property("buffer-time", sink_buf_us);
         eprintln!("[recv] sink.buffer-time={} us", sink_buf_us);
