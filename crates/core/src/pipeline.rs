@@ -230,8 +230,8 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
     let src = {
         let s = make_element("osxaudiosrc", "src")?;
         // Good macOS defaults (your proven values)
-        let src_buf_us: u64 = env::var("AB_SRC_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(200_000);
-        let src_lat_us: u64 = env::var("AB_SRC_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000);
+        let src_buf_us: i64 = env::var("AB_SRC_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(200_000);
+        let src_lat_us: i64 = env::var("AB_SRC_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000);
         if s.has_property("buffer-time", None) {
             s.set_property("buffer-time", src_buf_us);
             eprintln!("[sender] src.buffer-time={} us", src_buf_us);
@@ -446,8 +446,8 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
         make_element("pulsesink", "sink")?
     };
 
-    let sink_buf_us: u64 = env::var("SINK_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(70_000);
-    let sink_lat_us: u64 = env::var("SINK_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(15_000);
+    let sink_buf_us: i64 = env::var("SINK_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(70_000);
+    let sink_lat_us: i64 = env::var("SINK_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(15_000);
     if sink.has_property("buffer-time", None) {
         sink.set_property("buffer-time", sink_buf_us);
         eprintln!("[recv] sink.buffer-time={} us", sink_buf_us);
