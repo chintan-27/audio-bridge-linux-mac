@@ -201,7 +201,7 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
     let q_src = make_element("queue", "q_src")?;
     q_src.set_property("max-size-buffers", 0u32);
     q_src.set_property("max-size-bytes", 0u32);
-    q_src.set_property("max-size-time", 20_000_000i64); // 20 ms
+    q_src.set_property("max-size-time", 20_000_000u64); // 20 ms
 
     // Normalize format before Opus (low-latency canonical format)
     let convert = make_element("audioconvert", "aconv")?;
