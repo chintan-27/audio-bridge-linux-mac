@@ -99,6 +99,42 @@ fn attach_caps_probe(elem: &gst::Element, pad_name: &str, tag: &str) {
     }
 }
 
+/// Attach a simple TX stats probe that counts packets/bytes and logs every ~1s.
+fn attach_tx_stats(elem: &gst::Element, pad_name: &str, tag: &str) {
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    if let Some(pad) = elem.static_pad(pad_name) {
+        let state = Arc::new(Mutex::new((0u64, 0u64, Instant::now()))); // (pkts, bytes, t0)
+        let t = tag.to_string();
+        let st = state.clone();
+        pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
+            if let Some(buf) = info.buffer() {
+                let sz = buf.size() as u64;
+                let mut s = st.lock().unwrap();
+                s.0 += 1;
+                s.1 += sz;
+                let dt = s.2.elapsed();
+                if dt >= Duration::from_secs(1) {
+                    let pkts = s.0;
+                    let bytes = s.1;
+                    let bps = (bytes as f64) * 8.0 / dt.as_secs_f64();
+                    let kbps = bps / 1000.0;
+                    eprintln!(
+                        "[{t}] TX ~{:.0} pkts/s, ~{:.1} kbit/s ({} bytes in {:.2}s)",
+                        pkts as f64 / dt.as_secs_f64(),
+                        kbps,
+                        bytes,
+                        dt.as_secs_f64()
+                    );
+                    *s = (0, 0, Instant::now());
+                }
+            }
+            gst::PadProbeReturn::Ok
+        });
+    }
+}
+
 pub fn init_gst() -> Result<()> {
     gst::init().context("gst init failed")?;
     eprintln!(
@@ -150,8 +186,8 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
     }
 
     // Relax source buffers (env-overridable) to avoid "Can't record fast enough" on macOS
-    let src_buf_us: i64 = env::var("AB_SRC_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000);
-    let src_lat_us: i64 = env::var("AB_SRC_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000);
+    let src_buf_us: u64 = env::var("AB_SRC_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000);
+    let src_lat_us: u64 = env::var("AB_SRC_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000);
     if src.has_property("buffer-time", None) {
         src.set_property("buffer-time", src_buf_us);
         eprintln!("[sender] src.buffer-time={} us", src_buf_us);
@@ -180,6 +216,15 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
     capsfilter.set_property("caps", &caps);
     eprintln!("[sender] enforce caps: {}", caps.to_string());
 
+    // *** Sender-side level meter (what we're capturing) ***
+    let level_tx = make_element("level", "level_tx")?;
+    if level_tx.has_property("interval", None) {
+        level_tx.set_property("interval", 100_000_000u64); // 100 ms
+    }
+    if level_tx.has_property("post-messages", None) {
+        level_tx.set_property("post-messages", true);
+    }
+
     // Opus encode
     let opusenc = make_element("opusenc", "opusenc")?;
     opusenc.set_property("bitrate", 256_000i32);
@@ -203,13 +248,19 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
     sink.set_property("async", false);
     eprintln!("[sender] udpsink → {host}:{port}");
 
-    pipeline.add_many(&[&src, &q_src, &convert, &resample, &capsfilter, &opusenc, &pay, &sink])?;
-    gst::Element::link_many(&[&src, &q_src, &convert, &resample, &capsfilter, &opusenc, &pay, &sink])?;
+    // Build & link
+    pipeline.add_many(&[
+        &src, &q_src, &convert, &resample, &capsfilter, &level_tx, &opusenc, &pay, &sink,
+    ])?;
+    gst::Element::link_many(&[
+        &src, &q_src, &convert, &resample, &capsfilter, &level_tx, &opusenc, &pay, &sink,
+    ])?;
 
-    // Caps probes (handy when debugging)
+    // Caps & stats probes
     attach_caps_probe(&src, "src", "snd/src");
     attach_caps_probe(&opusenc, "src", "snd/opus");
     attach_caps_probe(&pay, "src", "snd/rtp");
+    attach_tx_stats(&pay, "src", "sender"); // <— throughput & packet rate
 
     attach_bus_logging(&pipeline, "sender");
     eprintln!("[sender] pipeline built");
@@ -313,8 +364,8 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
     };
 
     // Modest sink buffers (override via env if needed)
-    let sink_buf_us: i64 = env::var("SINK_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(70_000);
-    let sink_lat_us: i64 = env::var("SINK_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(15_000);
+    let sink_buf_us: u64 = env::var("SINK_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(70_000);
+    let sink_lat_us: u64 = env::var("SINK_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(15_000);
     if sink.has_property("buffer-time", None) {
         sink.set_property("buffer-time", sink_buf_us);
         eprintln!("[recv] sink.buffer-time={} us", sink_buf_us);
