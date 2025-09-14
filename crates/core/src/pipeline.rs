@@ -98,13 +98,13 @@ fn attach_caps_probe(elem: &gst::Element, pad_name: &str, tag: &str) {
     }
 }
 
-/// Attach a simple TX stats probe that counts packets/bytes and logs every ~1s.
+/// Attach a simple TX stats probe that counts packets/bytes and logs ~1s.
 fn attach_tx_stats(elem: &gst::Element, pad_name: &str, tag: &str) {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     if let Some(pad) = elem.static_pad(pad_name) {
-        let state = Arc::new(Mutex::new((0u64, 0u64, Instant::now()))); // (pkts, bytes, t0)
+        let state = Arc::new(Mutex::new((0u64, 0u64, Instant::now())));
         let t = tag.to_string();
         let st = state.clone();
         pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
@@ -152,7 +152,6 @@ pub fn init_gst() -> Result<()> {
 fn pick_pulse_monitor(prefer_contains: Option<&str>) -> Option<String> {
     use gst::{caps::Caps, DeviceMonitor};
     let mon = DeviceMonitor::new();
-    // We only care about audio capture devices (Pulse “sources”), which include monitors.
     mon.add_filter(Some("Audio/Source"), Some(&Caps::new_any()));
     mon.start().ok()?;
 
@@ -161,8 +160,8 @@ fn pick_pulse_monitor(prefer_contains: Option<&str>) -> Option<String> {
     let mut preferred: Option<String> = None;
 
     for d in mon.devices() {
-        let name = d.display_name().unwrap_or_default();
-        let class = d.device_class().unwrap_or_default();
+        let name = d.display_name().to_string();     // FIX: GString -> String
+        let class = d.device_class().to_string();    // FIX: GString -> String
         let props = d.properties();
 
         // Consider anything whose display name or known props contain "monitor"
@@ -170,14 +169,14 @@ fn pick_pulse_monitor(prefer_contains: Option<&str>) -> Option<String> {
         let mut dev_id: Option<String> = None;
 
         if let Some(p) = props {
-            // Pulsesrc expects the "device" string (e.g., "alsa_output....analog-stereo.monitor")
+            // Pulsesrc expects the "device" string (e.g., "alsa_output...analog-stereo.monitor")
             if let Ok(v) = p.get::<String>("device") {
                 dev_id = Some(v);
             } else if let Ok(v) = p.get::<String>("node.name") {
                 dev_id = Some(v);
             }
 
-            // Extra checks for monitor-ness in properties
+            // Extra checks for monitor-ness
             if !is_monitor {
                 if let Ok(desc) = p.get::<String>("device.description") {
                     if desc.to_lowercase().contains("monitor") {
@@ -194,13 +193,14 @@ fn pick_pulse_monitor(prefer_contains: Option<&str>) -> Option<String> {
 
         if is_monitor {
             let id = dev_id.clone().unwrap_or_else(|| name.clone());
-            eprintln!("[linux] found monitor candidate: id='{}' name='{}' class='{}'", id, name, class);
+            eprintln!(
+                "[linux] found monitor candidate: id='{}' name='{}' class='{}'",
+                id, name, class
+            );
 
-            // Record first monitor as fallback
             if first_monitor.is_none() {
                 first_monitor = Some(id.clone());
             }
-            // If a hint is provided, prefer the first candidate that matches it
             if let Some(h) = &hint {
                 if name.to_lowercase().contains(h) || id.to_lowercase().contains(h) {
                     preferred = Some(id);
@@ -210,7 +210,8 @@ fn pick_pulse_monitor(prefer_contains: Option<&str>) -> Option<String> {
         }
     }
 
-    mon.stop().ok();
+    // FIX: stop() returns (), not Result
+    mon.stop();
     preferred.or(first_monitor)
 }
 
@@ -219,10 +220,8 @@ fn pick_pulse_monitor(prefer_contains: Option<&str>) -> Option<String> {
 /* ------------------------------------------------------------------------- */
 
 /// Build an Opus-over-RTP sender.
-/// macOS: normally omit `device_name` and set **System Input = BlackHole 2ch**.
-/// Linux: by default we pick a **.monitor** device (system audio), not the mic.
-///   - `--capture-device` on Linux expects the **Pulse device string**, e.g.
-///     `alsa_output.pci-0000_00_1f.3.analog-stereo.monitor`
+/// macOS: normally omit `device_name` and set System Input = BlackHole 2ch.
+/// Linux: by default we pick a `.monitor` device (system audio), not the mic.
 pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<Sender> {
     let pipeline = gst::Pipeline::new();
 
@@ -230,9 +229,9 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
     #[cfg(target_os = "macos")]
     let src = {
         let s = make_element("osxaudiosrc", "src")?;
-        // macOS capture buffer/latency defaults — your proven-good values:
-        let src_buf_us: i64 = env::var("AB_SRC_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(200_000);
-        let src_lat_us: i64 = env::var("AB_SRC_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000);
+        // Good macOS defaults (your proven values)
+        let src_buf_us: u64 = env::var("AB_SRC_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(200_000);
+        let src_lat_us: u64 = env::var("AB_SRC_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000);
         if s.has_property("buffer-time", None) {
             s.set_property("buffer-time", src_buf_us);
             eprintln!("[sender] src.buffer-time={} us", src_buf_us);
@@ -241,7 +240,6 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
             s.set_property("latency-time", src_lat_us);
             eprintln!("[sender] src.latency-time={} us", src_lat_us);
         }
-        // Allow index override
         if let Some(name) = device_name {
             if s.has_property("device", None) {
                 if let Ok(idx) = name.parse::<i32>() {
@@ -257,12 +255,7 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
 
     #[cfg(target_os = "linux")]
     let src = {
-        // We’ll use pulsesrc because its "device" accepts monitor names directly (via pipewire-pulse).
         let s = make_element("pulsesrc", "src")?;
-
-        // Choose the monitor device:
-        // 1) If user provided --capture-device, use that exact Pulse device string.
-        // 2) Else, pick the first monitor; prefer the one matching $MONITOR_HINT if set.
         if let Some(dev) = device_name {
             if s.has_property("device", None) {
                 s.set_property("device", dev);
@@ -282,8 +275,6 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
                 }
             }
         }
-
-        // Optional extra latency/buffer if you want to tune Linux capture smoothness:
         if let Ok(v) = env::var("AB_SRC_BUFFER_US").and_then(|v| v.parse::<u64>().map_err(|_| env::VarError::NotPresent)) {
             if s.has_property("buffer-time", None) {
                 s.set_property("buffer-time", v);
@@ -296,7 +287,6 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
                 eprintln!("[sender] src.latency-time={} us", v);
             }
         }
-
         s
     };
 
@@ -304,12 +294,11 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
     let q_src = make_element("queue", "q_src")?;
     q_src.set_property("max-size-buffers", 0u32);
     q_src.set_property("max-size-bytes", 0u32);
-    q_src.set_property("max-size-time", 20_000_000u64); // 20 ms
+    q_src.set_property("max-size-time", 20_000_000u64);
 
     let convert = make_element("audioconvert", "aconv")?;
     let resample = make_element("audioresample", "ares")?;
 
-    // Canonical low-latency format to feed Opus
     let caps = gst::Caps::builder("audio/x-raw")
         .field("rate", 48_000i32)
         .field("channels", 2i32)
@@ -323,7 +312,7 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
     // Live meter of captured audio (before encode)
     let level_tx = make_element("level", "level_tx")?;
     if level_tx.has_property("interval", None) {
-        level_tx.set_property("interval", 100_000_000u64); // 100 ms
+        level_tx.set_property("interval", 100_000_000u64);
     }
     if level_tx.has_property("post-messages", None) {
         level_tx.set_property("post-messages", true);
@@ -440,7 +429,6 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
     q_sink.set_property("max-size-bytes", 0u32);
     q_sink.set_property("max-size-time", 20_000_000u64);
 
-    // Sink choice: use pulsesink by default on Linux, osxaudiosink on macOS
     let sink = if cfg!(target_os = "macos") {
         make_element("osxaudiosink", "sink")?
     } else if let Ok(dev) = env::var("PULSE_SINK") {
@@ -458,8 +446,8 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
         make_element("pulsesink", "sink")?
     };
 
-    let sink_buf_us: i64 = env::var("SINK_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(70_000);
-    let sink_lat_us: i64 = env::var("SINK_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(15_000);
+    let sink_buf_us: u64 = env::var("SINK_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(70_000);
+    let sink_lat_us: u64 = env::var("SINK_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(15_000);
     if sink.has_property("buffer-time", None) {
         sink.set_property("buffer-time", sink_buf_us);
         eprintln!("[recv] sink.buffer-time={} us", sink_buf_us);
