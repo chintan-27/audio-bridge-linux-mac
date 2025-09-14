@@ -60,7 +60,6 @@ fn attach_bus_logging(p: &gst::Pipeline, tag: &str) {
                     ),
                     MessageView::Element(el) => {
                         if let Some(s) = el.structure() {
-                            // Prints 'level' messages (rms/peak/decay) and any other element posts.
                             eprintln!("[{tag}] ELEMENT {}", s.to_string());
                         }
                     }
@@ -146,66 +145,171 @@ pub fn init_gst() -> Result<()> {
 }
 
 /* ------------------------------------------------------------------------- */
+/* Linux helper: pick a PulseAudio/pipewire *monitor* source                  */
+/* ------------------------------------------------------------------------- */
+
+#[cfg(target_os = "linux")]
+fn pick_pulse_monitor(prefer_contains: Option<&str>) -> Option<String> {
+    use gst::{caps::Caps, DeviceMonitor};
+    let mon = DeviceMonitor::new();
+    // We only care about audio capture devices (Pulse “sources”), which include monitors.
+    mon.add_filter(Some("Audio/Source"), Some(&Caps::new_any()));
+    mon.start().ok()?;
+
+    let hint = prefer_contains.map(|s| s.to_lowercase());
+    let mut first_monitor: Option<String> = None;
+    let mut preferred: Option<String> = None;
+
+    for d in mon.devices() {
+        let name = d.display_name().unwrap_or_default();
+        let class = d.device_class().unwrap_or_default();
+        let props = d.properties();
+
+        // Consider anything whose display name or known props contain "monitor"
+        let mut is_monitor = name.to_lowercase().contains("monitor");
+        let mut dev_id: Option<String> = None;
+
+        if let Some(p) = props {
+            // Pulsesrc expects the "device" string (e.g., "alsa_output....analog-stereo.monitor")
+            if let Ok(v) = p.get::<String>("device") {
+                dev_id = Some(v);
+            } else if let Ok(v) = p.get::<String>("node.name") {
+                dev_id = Some(v);
+            }
+
+            // Extra checks for monitor-ness in properties
+            if !is_monitor {
+                if let Ok(desc) = p.get::<String>("device.description") {
+                    if desc.to_lowercase().contains("monitor") {
+                        is_monitor = true;
+                    }
+                }
+                if let Ok(nodename) = p.get::<String>("node.name") {
+                    if nodename.to_lowercase().contains("monitor") {
+                        is_monitor = true;
+                    }
+                }
+            }
+        }
+
+        if is_monitor {
+            let id = dev_id.clone().unwrap_or_else(|| name.clone());
+            eprintln!("[linux] found monitor candidate: id='{}' name='{}' class='{}'", id, name, class);
+
+            // Record first monitor as fallback
+            if first_monitor.is_none() {
+                first_monitor = Some(id.clone());
+            }
+            // If a hint is provided, prefer the first candidate that matches it
+            if let Some(h) = &hint {
+                if name.to_lowercase().contains(h) || id.to_lowercase().contains(h) {
+                    preferred = Some(id);
+                    break;
+                }
+            }
+        }
+    }
+
+    mon.stop().ok();
+    preferred.or(first_monitor)
+}
+
+/* ------------------------------------------------------------------------- */
 /* Sender                                                                     */
 /* ------------------------------------------------------------------------- */
 
 /// Build an Opus-over-RTP sender.
 /// macOS: normally omit `device_name` and set **System Input = BlackHole 2ch**.
-/// If you pass a device, `osxaudiosrc.device` is an **integer index**.
+/// Linux: by default we pick a **.monitor** device (system audio), not the mic.
+///   - `--capture-device` on Linux expects the **Pulse device string**, e.g.
+///     `alsa_output.pci-0000_00_1f.3.analog-stereo.monitor`
 pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<Sender> {
     let pipeline = gst::Pipeline::new();
 
-    // Source
-    let src = if cfg!(target_os = "macos") {
-        make_element("osxaudiosrc", "src")?
-    } else {
-        make_element("pipewiresrc", "src")?
-    };
-
-    // Device selection (safe)
-    if let Some(name) = device_name {
-        let mut set_ok = false;
-        if src.has_property("device-name", None) {
-            src.set_property("device-name", name);
-            eprintln!("[sender] set device-name='{name}'");
-            set_ok = true;
-        } else if src.has_property("device", None) {
-            if let Ok(idx) = name.parse::<i32>() {
-                src.set_property("device", idx);
-                eprintln!("[sender] set device index={idx}");
-                set_ok = true;
-            } else {
-                eprintln!("[sender] note: 'device' expects integer index; got '{name}'");
+    // ---------- Source selection ----------
+    #[cfg(target_os = "macos")]
+    let src = {
+        let s = make_element("osxaudiosrc", "src")?;
+        // macOS capture buffer/latency defaults — your proven-good values:
+        let src_buf_us: i64 = env::var("AB_SRC_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(200_000);
+        let src_lat_us: i64 = env::var("AB_SRC_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000);
+        if s.has_property("buffer-time", None) {
+            s.set_property("buffer-time", src_buf_us);
+            eprintln!("[sender] src.buffer-time={} us", src_buf_us);
+        }
+        if s.has_property("latency-time", None) {
+            s.set_property("latency-time", src_lat_us);
+            eprintln!("[sender] src.latency-time={} us", src_lat_us);
+        }
+        // Allow index override
+        if let Some(name) = device_name {
+            if s.has_property("device", None) {
+                if let Ok(idx) = name.parse::<i32>() {
+                    s.set_property("device", idx);
+                    eprintln!("[sender] set device index={idx}");
+                } else {
+                    eprintln!("[sender][warn] macOS '--capture-device' must be an integer index; got '{name}'");
+                }
             }
         }
-        if !set_ok {
-            eprintln!(
-                "[sender][warn] capture device hint '{name}' ignored (need 'device-name' or integer 'device')"
-            );
+        s
+    };
+
+    #[cfg(target_os = "linux")]
+    let src = {
+        // We’ll use pulsesrc because its "device" accepts monitor names directly (via pipewire-pulse).
+        let s = make_element("pulsesrc", "src")?;
+
+        // Choose the monitor device:
+        // 1) If user provided --capture-device, use that exact Pulse device string.
+        // 2) Else, pick the first monitor; prefer the one matching $MONITOR_HINT if set.
+        if let Some(dev) = device_name {
+            if s.has_property("device", None) {
+                s.set_property("device", dev);
+                eprintln!("[linux] pulsesrc.device='{}' (from --capture-device)", dev);
+            }
+        } else {
+            let hint = env::var("MONITOR_HINT").ok();
+            match pick_pulse_monitor(hint.as_deref()) {
+                Some(dev) => {
+                    if s.has_property("device", None) {
+                        s.set_property("device", dev.as_str());
+                        eprintln!("[linux] using monitor device='{}'", dev);
+                    }
+                }
+                None => {
+                    eprintln!("[linux][warn] no monitor source found; falling back to default pulsesrc (may be the mic)");
+                }
+            }
         }
-    }
 
-    // Relax source buffers (env-overridable) to avoid "Can't record fast enough" on macOS
-    let src_buf_us: i64 = env::var("AB_SRC_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000);
-    let src_lat_us: i64 = env::var("AB_SRC_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000);
-    if src.has_property("buffer-time", None) {
-        src.set_property("buffer-time", src_buf_us);
-        eprintln!("[sender] src.buffer-time={} us", src_buf_us);
-    }
-    if src.has_property("latency-time", None) {
-        src.set_property("latency-time", src_lat_us);
-        eprintln!("[sender] src.latency-time={} us", src_lat_us);
-    }
+        // Optional extra latency/buffer if you want to tune Linux capture smoothness:
+        if let Ok(v) = env::var("AB_SRC_BUFFER_US").and_then(|v| v.parse::<u64>().map_err(|_| env::VarError::NotPresent)) {
+            if s.has_property("buffer-time", None) {
+                s.set_property("buffer-time", v);
+                eprintln!("[sender] src.buffer-time={} us", v);
+            }
+        }
+        if let Ok(v) = env::var("AB_SRC_LATENCY_US").and_then(|v| v.parse::<u64>().map_err(|_| env::VarError::NotPresent)) {
+            if s.has_property("latency-time", None) {
+                s.set_property("latency-time", v);
+                eprintln!("[sender] src.latency-time={} us", v);
+            }
+        }
 
-    // Decouple source from encoder with a tiny time-based queue
+        s
+    };
+
+    // ---------- Format normalize & caps ----------
     let q_src = make_element("queue", "q_src")?;
     q_src.set_property("max-size-buffers", 0u32);
     q_src.set_property("max-size-bytes", 0u32);
     q_src.set_property("max-size-time", 20_000_000u64); // 20 ms
 
-    // Normalize format before Opus (low-latency canonical format)
     let convert = make_element("audioconvert", "aconv")?;
     let resample = make_element("audioresample", "ares")?;
+
+    // Canonical low-latency format to feed Opus
     let caps = gst::Caps::builder("audio/x-raw")
         .field("rate", 48_000i32)
         .field("channels", 2i32)
@@ -216,7 +320,7 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
     capsfilter.set_property("caps", &caps);
     eprintln!("[sender] enforce caps: {}", caps.to_string());
 
-    // *** Sender-side level meter (what we're capturing) ***
+    // Live meter of captured audio (before encode)
     let level_tx = make_element("level", "level_tx")?;
     if level_tx.has_property("interval", None) {
         level_tx.set_property("interval", 100_000_000u64); // 100 ms
@@ -225,30 +329,30 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
         level_tx.set_property("post-messages", true);
     }
 
-    // Opus encode
+    // ---------- Opus enc + RTP + UDP ----------
     let opusenc = make_element("opusenc", "opusenc")?;
     opusenc.set_property("bitrate", 256_000i32);
     opusenc.set_property("inband-fec", false);
     if opusenc.has_property("frame-size", None) {
-        opusenc.set_property_from_str("frame-size", "2.5"); // parsed enum
+        opusenc.set_property_from_str("frame-size", "2.5");
     }
     if opusenc.has_property("complexity", None) {
-        opusenc.set_property("complexity", 5i32); // lighter CPU than default 9
+        opusenc.set_property("complexity", 5i32);
         eprintln!("[sender] opusenc.complexity=5");
     }
     eprintln!("[sender] opusenc: bitrate=256000, frame-size=2.5ms");
 
-    // RTP pay + UDP out
     let pay = make_element("rtpopuspay", "pay")?;
-    pay.set_property("pt", 97u32); // guint
+    pay.set_property("pt", 97u32);
+
     let sink = make_element("udpsink", "udpsink")?;
     sink.set_property("host", host);
-    sink.set_property("port", port as i32); // gint
+    sink.set_property("port", port as i32);
     sink.set_property("sync", false);
     sink.set_property("async", false);
     eprintln!("[sender] udpsink → {host}:{port}");
 
-    // Build & link
+    // ---------- Build & link ----------
     pipeline.add_many(&[
         &src, &q_src, &convert, &resample, &capsfilter, &level_tx, &opusenc, &pay, &sink,
     ])?;
@@ -256,11 +360,10 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
         &src, &q_src, &convert, &resample, &capsfilter, &level_tx, &opusenc, &pay, &sink,
     ])?;
 
-    // Caps & stats probes
     attach_caps_probe(&src, "src", "snd/src");
     attach_caps_probe(&opusenc, "src", "snd/opus");
     attach_caps_probe(&pay, "src", "snd/rtp");
-    attach_tx_stats(&pay, "src", "sender"); // <— throughput & packet rate
+    attach_tx_stats(&pay, "src", "sender");
 
     attach_bus_logging(&pipeline, "sender");
     eprintln!("[sender] pipeline built");
@@ -274,14 +377,14 @@ pub fn build_sender(device_name: Option<&str>, host: &str, port: u16) -> Result<
 pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
     let pipeline = gst::Pipeline::new();
 
-    // UDP in + fixed RTP caps on udpsrc (use 'payload' for compatibility)
     let src = make_element("udpsrc", "udpsrc")?;
-    src.set_property("port", listen_port as i32); // gint
+    src.set_property("port", listen_port as i32);
+
     let rtp_caps = gst::Caps::builder("application/x-rtp")
         .field("media", "audio")
         .field("encoding-name", "OPUS")
         .field("clock-rate", 48_000i32)
-        .field("payload", 97i32) // <-- key (not 'pt')
+        .field("payload", 97i32)
         .build();
     src.set_property("caps", &rtp_caps);
     eprintln!(
@@ -290,18 +393,16 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
         rtp_caps.to_string()
     );
 
-    // Small decoupling queue right after network
     let q_net = make_element("queue", "q_net")?;
     q_net.set_property("max-size-buffers", 0u32);
     q_net.set_property("max-size-bytes", 0u32);
-    q_net.set_property("max-size-time", 20_000_000u64); // 20 ms
+    q_net.set_property("max-size-time", 20_000_000u64);
 
-    // Jitter buffer (tunable via env)
     let jitter = make_element("rtpjitterbuffer", "jbuf")?;
     let jitter_ms: u32 = env::var("JITTER_MS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(30); // default 30 ms
+        .unwrap_or(30);
     if jitter.has_property("latency", None) {
         jitter.set_property("latency", jitter_ms);
         eprintln!("[recv] jbuf.latency={} ms", jitter_ms);
@@ -309,14 +410,13 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
     if jitter.has_property("drop-on-late", None) {
         let drop_on_late = env::var("DROP_ON_LATE").map(|v| v == "1").unwrap_or(true);
         jitter.set_property("drop-on-late", drop_on_late);
-        eprintln!("[recv] jbuf.drop-on-late={drop_on_late}");
+        eprintln!("[recv] jbuf.do-lost=true");
     }
     if jitter.has_property("do-lost", None) {
         jitter.set_property("do-lost", true);
         eprintln!("[recv] jbuf.do-lost=true");
     }
 
-    // Depay + decode + format
     let depay = make_element("rtpopusdepay", "depay")?;
     let dec = make_element("opusdec", "opusdec")?;
     if dec.has_property("plc", None) {
@@ -327,25 +427,20 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
     let convert = make_element("audioconvert", "aconv")?;
     let resample = make_element("audioresample", "ares")?;
 
-    // Live audio meter to verify decoded audio activity
     let level = make_element("level", "level")?;
     if level.has_property("interval", None) {
-        level.set_property("interval", 100_000_000u64); // 100 ms
+        level.set_property("interval", 100_000_000u64);
     }
     if level.has_property("post-messages", None) {
         level.set_property("post-messages", true);
     }
 
-    // Another tiny queue before sink to absorb sink scheduling
     let q_sink = make_element("queue", "q_sink")?;
     q_sink.set_property("max-size-buffers", 0u32);
     q_sink.set_property("max-size-bytes", 0u32);
-    q_sink.set_property("max-size-time", 20_000_000u64); // 20 ms
+    q_sink.set_property("max-size-time", 20_000_000u64);
 
-    // Sink selection:
-    // - If PULSE_SINK is set: use pulsesink and route to that exact device.
-    // - Else if AUTO_SINK=1: use autoaudiosink (Pulse by default).
-    // - Else (fallback): use pulsesink (avoid pipewiresink quirks).
+    // Sink choice: use pulsesink by default on Linux, osxaudiosink on macOS
     let sink = if cfg!(target_os = "macos") {
         make_element("osxaudiosink", "sink")?
     } else if let Ok(dev) = env::var("PULSE_SINK") {
@@ -363,7 +458,6 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
         make_element("pulsesink", "sink")?
     };
 
-    // Modest sink buffers (override via env if needed)
     let sink_buf_us: i64 = env::var("SINK_BUFFER_US").ok().and_then(|v| v.parse().ok()).unwrap_or(70_000);
     let sink_lat_us: i64 = env::var("SINK_LATENCY_US").ok().and_then(|v| v.parse().ok()).unwrap_or(15_000);
     if sink.has_property("buffer-time", None) {
@@ -387,7 +481,6 @@ pub fn build_receiver(listen_port: u16) -> Result<Receiver> {
         &src, &q_net, &jitter, &depay, &dec, &convert, &resample, &level, &q_sink, &sink,
     ])?;
 
-    // Probes
     attach_caps_probe(&depay, "src", "rcv/opus");
     attach_caps_probe(&sink, "sink", "rcv/sink");
 
