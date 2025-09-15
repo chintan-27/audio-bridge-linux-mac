@@ -147,19 +147,19 @@ gst-launch-1.0 udpsrc port=5004 caps="application/x-rtp,media=audio,encoding-nam
 
 ## 🛣️ TODO
 
-* 🔁 Drift correction (adaptive resampling).
-* 🔒 SRTP/DTLS encryption.
-* 🌍 WebRTC transport for WAN.
-* 🖥️ GUI (Tauri tray app with meters).
-* 🎚️ Per-app routing (Loopback on macOS, PipeWire filters on Linux).
-* 📦 Better install scripts (brew/apt).
-
+* Drift correction (adaptive resampling).
+* SRTP/DTLS encryption.
+* WebRTC transport for WAN.
+* GUI (Tauri tray app with meters).
+* Per-app routing (Loopback on macOS, PipeWire filters on Linux).
+* Better install scripts (brew/apt).
+* Smart Setup Scripts, that handles inputs and outputs cleanly, and save the default for graceful exit.
+* Graceful exit, currently it's just Ctrl + C, re assigns the inputs and outputs to what they were.
+* Add smarter handling for the same in case is they want to pause the connection or similar.
+* Make it adaptable to windows too. 
 ---
 
 ## 📜 License
 
 MIT
 
-```
-
----
