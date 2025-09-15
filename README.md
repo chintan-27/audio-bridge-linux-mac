@@ -1,91 +1,72 @@
 # Audio Bridge (Rust, v1)
 
 A cross-platform, low-latency LAN audio bridge between **Linux** and **macOS**.  
-It captures **“what you hear”** (system or app audio), encodes with Opus, ships over RTP/UDP, and plays it on the other machine.
+It captures **“what you hear”** (system or app audio), encodes with **Opus**, ships over **RTP/UDP**, and plays it on the other machine.
 
 Think “DIY Dante Lite” for home/office, written in Rust.
 
 ---
 
-## Features (v1)
-- Bidirectional streaming (run on both machines).
-- Captures system audio (via BlackHole on macOS, PipeWire loopback on Linux).
-- Low-latency Opus encode (2.5–5 ms frames).
-- Auto-playback on system speakers.
-- mDNS advertisement (peers show up automatically).
+## ✨ Features
+- 🔄 **Bidirectional streaming** (run on both machines).
+- 🎧 Captures system audio (BlackHole on macOS, PipeWire monitor on Linux).
+- ⚡ Low-latency Opus (2.5–5 ms frames).
+- 🔊 Automatic playback on system speakers.
+- 🌐 Optional mDNS advertisement for peer auto-discovery.
 
 ---
 
-## 1. Setup
+## 🔧 Setup
 
 ### macOS
-1. Run the setup script:
-   ```bash
-   cd scripts
-   ./macos_setup.sh
-    ```
+```bash
+cd scripts
+./macos_setup.sh
+````
 
 This installs:
 
 * GStreamer + plugins
-* BlackHole 2ch (virtual audio device)
+* BlackHole 2ch (virtual device)
 * SwitchAudioSource CLI
 
-2. In **Audio MIDI Setup**:
+Then in **Audio MIDI Setup**:
 
-   * Create a **Multi-Output Device** with:
+* Create a **Multi-Output Device** with:
 
-     * ✅ BlackHole 2ch
-     * ✅ Your speakers (e.g., MacBook Speakers, Headphones)
-   * Right-click → *Use This Device For Sound Output*.
-     This mirrors everything you hear to both your speakers and BlackHole.
-
-3. To route audio later:
-
-   ```bash
-   ./macos_setup.sh route_system_to_multi
-   ./macos_setup.sh route_system_to_builtin
-   ```
-
-### Linux (PipeWire)
-
-1. Run the setup script:
-
-   ```bash
-   cd scripts
-   ./linux_setup.sh
-   ```
-
-   This installs:
-
-   * GStreamer + plugins
-   * PipeWire + WirePlumber
-   * Pulseaudio utils (for pactl)
-
-   It also creates a **null sink** called `bridge_out` and sets it as default.
-
-2. All playback now goes into `bridge_out`. Capture the monitor source:
-
-   * Run `./linux_setup.sh list_sources`
-   * Look for `bridge_out.monitor` — that’s your TX source.
-
-3. To remove later:
-
-   ```bash
-   ./linux_setup.sh remove_bridge_sink
-   ```
+  * ✅ BlackHole 2ch
+  * ✅ Your speakers (MacBook Speakers / Headphones)
+* Set it as the default output.
 
 ---
 
-## 2. Build the Daemon
+### Linux (PipeWire)
 
-Install Rust (1.75+ recommended), then:
+```bash
+cd scripts
+./linux_setup.sh
+```
+
+This installs:
+
+* GStreamer + plugins
+* PipeWire + WirePlumber
+* Pulseaudio utils (`pactl`)
+
+It also creates a **null sink** called `bridge_out`.
+Use its `.monitor` source as your TX input.
+
+---
+
+## 🛠️ Build the Daemon
+
+Install Rust (1.75+ recommended):
 
 ```bash
 cargo build --release
 ```
 
-Executable lives at:
+Binary is at:
 
 ```
 target/release/ab-daemon
@@ -93,34 +74,36 @@ target/release/ab-daemon
 
 ---
 
-## 3. Run it
+## 🚀 Run It
 
-### On Linux (receiver only):
+### Linux (receiver only):
 
 ```bash
-./target/release/ab-daemon --listen_port 5004
+./target/release/ab-daemon --listen-port 5004
 ```
 
-### On macOS (sender + receiver):
+### macOS (sender + receiver):
 
 ```bash
+AB_SRC_BUFFER_US=200000 AB_SRC_LATENCY_US=10000 \
 ./target/release/ab-daemon \
-  --capture_device "BlackHole 2ch" \
-  --send_to <LINUX_IP> \
-  --send_port 5002 \
-  --listen_port 5004
+  --capture-device "BlackHole 2ch" \
+  --send-to <LINUX_IP> \
+  --send-port 5002 \
+  --listen-port 5004
 ```
 
-* Replace `<LINUX_IP>` with the LAN IP of your Linux box.
-* Run the reverse command on Linux (with `--send_to <MAC_IP>`) for full duplex.
+* Replace `<LINUX_IP>` with your Linux machine’s LAN IP.
+* Run the reverse command on Linux (with `--send-to <MAC_IP>`) for full duplex.
+
+💡 **Note**: `AB_SRC_BUFFER_US` and `AB_SRC_LATENCY_US` are critical on macOS.
+Start with `200000` / `10000` and tune as needed.
 
 ---
 
-## 4. Quick Test (without Rust daemon)
+## 🔍 Quick Test (without daemon)
 
-You can also sanity-check with raw GStreamer:
-
-**macOS → Linux**
+### macOS → Linux
 
 ```bash
 # macOS (sender)
@@ -132,35 +115,51 @@ gst-launch-1.0 osxaudiosrc device="BlackHole 2ch" \
 
 # Linux (receiver)
 gst-launch-1.0 udpsrc port=5004 caps="application/x-rtp,media=audio,encoding-name=OPUS,clock-rate=48000,pt=97" \
-  ! rtpjitterbuffer latency=10 drop-on-late=true do-lost=true \
+  ! rtpjitterbuffer latency=30 drop-on-late=true do-lost=true \
   ! rtpopusdepay ! opusdec \
   ! audioconvert ! audioresample ! pipewiresink
 ```
 
 ---
 
-## Coming Next
+## 🐞 Troubleshooting
 
-* **Drift correction**
-  Adaptive resampling to stay perfectly in sync across devices.
+* **Silence on macOS sender**
+  Ensure you run from the **Terminal** (not VSCode), so the app has microphone permissions.
+  Set `AB_SRC_BUFFER_US=200000` and `AB_SRC_LATENCY_US=10000`.
 
-* **Security**
-  Optional SRTP with a shared key for LAN, later DTLS-SRTP for WAN.
+* **CoreAudio device not found**
+  Check your device list with:
 
-* **WebRTC transport**
-  Use WebRTC for WAN/NAT traversal, keeping RTP/UDP as “LAN turbo mode.”
+  ```bash
+  gst-device-monitor-1.0 Audio
+  ```
 
-* **UI (Tauri app)**
-  Tray icon with peer discovery, connect/disconnect, and level meters.
+  Then use the correct `--capture-device <INDEX>`.
 
-* **Advanced routing**
-  Per-app capture on macOS (Loopback), multi-room playback (multicast).
+* **Linux internal mic sounds noisy**
+  Use the `.monitor` source of a null sink (e.g., `bridge_out.monitor`) instead of the raw mic.
+
+* **No audio on Linux playback**
+  Confirm the RTP caps match exactly (`payload=97`, `clock-rate=48000`, `encoding-name=OPUS`).
 
 ---
 
-## License
+## 🛣️ TODO
+
+* 🔁 Drift correction (adaptive resampling).
+* 🔒 SRTP/DTLS encryption.
+* 🌍 WebRTC transport for WAN.
+* 🖥️ GUI (Tauri tray app with meters).
+* 🎚️ Per-app routing (Loopback on macOS, PipeWire filters on Linux).
+* 📦 Better install scripts (brew/apt).
+
+---
+
+## 📜 License
 
 MIT
 
 ```
 
+---
